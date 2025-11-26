@@ -23,9 +23,9 @@ The script requires Python 3.x and several external libraries. You can typically
 pip install numpy opencv-python scikit-image sknw scipy argparse
 
 
-python p22g.py <INPUT_IMAGE> <OUTPUT_GCODE> [OPTIONS]
+python Width2Depth.py <INPUT_IMAGE> <OUTPUT_GCODE> [OPTIONS]
 
-python p22g.py input.png output.gcode --width 300 --height 300 --z_paint_max -0.5 --z_paint_min -0.1 --feed_rate 1500
+python Width2Depth.py input.png output.gcode --width 300 --height 300 --z_paint_max -0.5 --z_paint_min -0.1 --feed_rate 1500
 
 Argument,Description,Default
 INPUT_IMAGE,"Path to the source image file (e.g., PNG, JPEG).",N/A
