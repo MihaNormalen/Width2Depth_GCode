@@ -22,6 +22,7 @@ The script requires Python 3.x and several external libraries. You can typically
 ```bash
 pip install numpy opencv-python scikit-image sknw scipy argparse
 
+
 python p22g.py <INPUT_IMAGE> <OUTPUT_GCODE> [OPTIONS]
 
 python p22g.py input.png output.gcode --width 300 --height 300 --z_paint_max -0.5 --z_paint_min -0.1 --feed_rate 1500
