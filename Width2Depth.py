@@ -16,15 +16,14 @@ class GCodeBaseGenerator:
     Base class for G-code generation with common parameters and dipping logic.
     Includes a global Z-offset for machine coordinate adjustment.
     """
-    def __init__(self, feed_rate, feed_rate_dip, x_offset, y_offset,
+    def __init__(self, feed_rate, x_offset, y_offset,
                  dip_location_raw, total_target_dips, dip_duration_s,
-                 dip_wipe_radius, dip_spiral_radius, z_wipe_travel_raw,
+                 dip_wipe_radius, z_wipe_travel_raw,
                  dip_entry_radius, total_dip_entries, remove_drops_enabled,
                  dip_shake_distance, z_global_offset_val,
                  z_safe_raw, z_safe_dip_raw):
 
         self.feed_rate = feed_rate
-        self.feed_rate_dip = feed_rate_dip # Slower feed rate for spiral/dipping
         self.x_offset = x_offset
         self.y_offset = y_offset
         self.gcode = []
@@ -42,95 +41,104 @@ class GCodeBaseGenerator:
         self.total_target_dips = total_target_dips
         self.dip_duration_s = dip_duration_s
         self.dip_wipe_radius = dip_wipe_radius
-        self.dip_spiral_radius = dip_spiral_radius
-        self.dip_entry_radius = dip_entry_radius # Acts as 'jitter'
+        self.dip_entry_radius = dip_entry_radius
         self.total_dip_entries = total_dip_entries
         self.remove_drops_enabled = remove_drops_enabled
         self.dip_shake_distance = dip_shake_distance
 
-        # Internal state
+        # For remove_drops logic
+        self.remove_drops_lift = self.z_wipe_travel
+        self.tray_enter_radius = self.dip_entry_radius
+        self.remove_drops_radius = self.dip_wipe_radius
+        self.offset_x = self.x_offset
+        self.offset_y = self.y_offset
+
+        # Flag to ensure only one initial dip
         self._initial_dip_performed = False
-        self.dip_count = 0
 
-    def _perform_dip(self, target_x, target_y):
+    def _get_random_point_in_circle(self, center_x, center_y, radius):
+        angle = random.uniform(0, 2 * math.pi)
+        r = radius
+        x = center_x + r * math.cos(angle)
+        y = center_y + r * math.sin(angle)
+        return x, y
+
+    def remove_drops(self, tray_x, tray_y, x, y):
         """
-        Performs the dipping sequence:
-        1. Travel to dip location (diagonal entry).
-        2. Spiral mix in paint.
-        3. Lift and wipe towards the target.
-        4. Travel to target location (diagonal exit).
+        Povzeto iz copicograf.py:
+        Premakne čopič na rob posodice za brisanje kapljic.
         """
-        dip_x, dip_y, dip_z = self.dip_location
-        
-        # --- 1. DIAGONAL ENTRY INTO DIP STATION ---
-        # Random jitter for entry point
-        j_x = random.uniform(-self.dip_entry_radius, self.dip_entry_radius)
-        j_y = random.uniform(-self.dip_entry_radius, self.dip_entry_radius)
-        active_x = dip_x + j_x
-        active_y = dip_y + j_y
+        dist = math.hypot((tray_x - (x + self.offset_x)), (tray_y - (y + self.offset_y)))
+        if dist == 0:
+            dist = 0.01  # Prevent division by zero
+        ratio_start = self.tray_enter_radius / dist
+        ratio_end = self.remove_drops_radius / dist
 
-        # Move rapidly to safe Z above dip location (Diagonal-ish move if supported, otherwise rapid XYZ)
-        self.gcode.append(f"G0 X{active_x:.3f} Y{active_y:.3f} Z{self.z_safe_dip:.3f}")
+        delta_x = abs(tray_x - (x + self.offset_x))
+        delta_y = abs(tray_y - (y + self.offset_y))
+        x_operator = -1 if tray_x > (x + self.offset_x) else 1
+        y_operator = -1 if (y + self.offset_y) < tray_y else 1
 
-        # --- 2. SPIRAL MIXING ---
-        # Plunge into paint
-        self.gcode.append(f"G1 Z{dip_z:.3f} F{self.feed_rate_dip}")
-        
-        # Alternate direction based on dip count
-        direction = 1 if (self.dip_count % 2 == 0) else -1
-        self.dip_count += 1
-        
-        # Generate spiral path
-        theta = 0
-        max_theta = 2.5 * math.pi
-        step_theta = 0.1
-        
-        while theta <= max_theta:
-            # Radius grows as theta grows
-            r = (theta / max_theta) * self.dip_spiral_radius
-            sx = active_x + r * math.cos(theta * direction)
-            sy = active_y + r * math.sin(theta * direction)
-            self.gcode.append(f"G1 X{sx:.3f} Y{sy:.3f}")
-            theta += step_theta
-            
-        # Dwell
+        x1 = int(tray_x + (x_operator * delta_x * ratio_start))
+        y1 = int(tray_y + (y_operator * delta_y * ratio_start))
+        x2 = int(tray_x + (x_operator * delta_x * ratio_end))
+        y2 = int(tray_y + (y_operator * delta_y * ratio_end))
+
+        # Premik na vstopno točko
+        self.gcode.append(f"G0 X{x1:.3f} Y{y1:.3f}")
+        # Dvig na višino brisanja
+        self.gcode.append(f"G0 Z{self.remove_drops_lift:.3f}")
+        # Počasna hitrost za brisanje
+        self.gcode.append("G1 F1200")
+        # Premik do izhodne točke (rob posodice)
+        self.gcode.append(f"G1 X{x2:.3f} Y{y2:.3f}")
+        # Povratek na hitro hitrost
+        self.gcode.append(f"G0 F{self.feed_rate}")
+
+    def _perform_dip(self):
+        # 1. Move to safe height above dip location
+        self.gcode.append(f"G0 Z{self.z_safe_dip}")
+        self.gcode.append(f"G0 X{self.dip_location[0]:.3f} Y{self.dip_location[1]:.3f}")
+
+        # 2. Dip into paint (center of container)
+        self.gcode.append(f"G1 Z{self.dip_location[2]:.3f} F1000")
         if self.dip_duration_s > 0:
             self.gcode.append(f"G4 P{int(self.dip_duration_s * 1000)}")
 
-        # --- 3. DIAGONAL EXIT AND WIPE ---
-        # Lift vertical to safe dip height
-        self.gcode.append(f"G0 Z{self.z_safe_dip:.3f}")
-        
-        # Calculate wipe position: Edge of Petri dish in the direction of the target
-        angle = math.atan2(target_y - dip_y, target_x - dip_x)
-        wipe_x = dip_x + self.dip_wipe_radius * math.cos(angle)
-        wipe_y = dip_y + self.dip_wipe_radius * math.sin(angle)
-        
-        # Move to wipe position at safe height
-        self.gcode.append(f"G0 X{wipe_x:.3f} Y{wipe_y:.3f} Z{self.z_safe_dip:.3f}")
-        
-        # --- 4. TRAVEL TO TARGET ---
-        # Diagonal descent: Move directly to target X,Y at Z_safe (low safe height)
-        # Reset feed rate for travel
+        # 3. Dvig na višino brisanja
+        wipe_z = self.dip_location[2] + 2.0
+        self.gcode.append(f"G1 Z{wipe_z:.3f} F1000")
+
+        # 4. Brisanje čopiča na rob posodice (remove_drops logika)
+        if self.remove_drops_enabled:
+            # Brisanje v smeri +X (lahko dodaš naključni kot)
+            self.remove_drops(
+                tray_x=self.dip_location[0],
+                tray_y=self.dip_location[1],
+                x=self.dip_location[0] + self.dip_wipe_radius,
+                y=self.dip_location[1]
+            )
+
+        # 5. Move up to safe height
+        self.gcode.append(f"G1 Z{self.z_safe_dip:.3f} F2000")
+        # 6. Reset feed rate to normal
         self.gcode.append(f"G0 F{self.feed_rate}")
-        self.gcode.append(f"G0 X{target_x:.3f} Y{target_y:.3f} Z{self.z_safe:.3f}")
 
     def save(self, filename):
         with open(filename, 'w') as f:
             f.write("\n".join(self.gcode))
         print(f"G-code saved to {filename}")
 
-    def _initial_setup(self, start_x=None, start_y=None):
+    def _initial_setup(self):
         self.gcode.append("G90 ; Set Absolute Positioning")
         self.gcode.append("G21 ; Set Units to Millimeters")
         self.gcode.append(f"G0 Z{self.z_safe:.2f} ; Lift to general safe height")
 
         if self.total_target_dips > 0 and not self._initial_dip_performed:
-            if start_x is not None and start_y is not None:
-                print("Performing initial brush dip before starting.")
-                self._perform_dip(start_x, start_y)
-                self.total_target_dips = max(0, self.total_target_dips - 1)
-                self._initial_dip_performed = True
+            print("Performing initial brush dip before starting.")
+            self._perform_dip()
+            self.total_target_dips = max(0, self.total_target_dips - 1)
+            self._initial_dip_performed = True
 
 class SkeletonGCodeGenerator(GCodeBaseGenerator):
     """
@@ -215,6 +223,7 @@ class SkeletonGCodeGenerator(GCodeBaseGenerator):
         return scaled_toolpaths, max_scaled_width
 
     def generate_from_image(self, image_path, target_w_mm, target_h_mm):
+        self._initial_setup()
         print(f"Processing image for skeleton method: {image_path}")
         scaled_toolpaths, max_brush_width = self._process_image_for_skeleton(
             image_path, target_w_mm, target_h_mm
@@ -222,23 +231,14 @@ class SkeletonGCodeGenerator(GCodeBaseGenerator):
         if not scaled_toolpaths:
             print("No significant strokes found in the image. Exiting.")
             return
-
-        # Prepare initial setup with the first point of the first path
-        first_path = scaled_toolpaths[0]
-        start_x_initial = first_path[0][0] + self.x_offset
-        start_y_initial = first_path[0][1] + self.y_offset
-        self._initial_setup(start_x=start_x_initial, start_y=start_y_initial)
-
         if self.smooth_window_size > 1:
             smoothed_final_toolpaths = []
             for path in scaled_toolpaths:
                 smoothed_final_toolpaths.append(self._smooth_path(path))
             scaled_toolpaths = smoothed_final_toolpaths
             print(f"Applied smoothing with window size: {self.smooth_window_size}")
-        
         self.max_width_mm = max(max_brush_width, 0.001)
         print(f"Generating G-code with estimated max brush width: {self.max_width_mm:.2f}mm")
-        
         total_strokes = len(scaled_toolpaths)
         dip_interval_strokes = 0
         if self.total_target_dips > 0 and total_strokes > 0:
@@ -246,41 +246,29 @@ class SkeletonGCodeGenerator(GCodeBaseGenerator):
             print(f"Total strokes: {total_strokes}, Remaining target dips: {self.total_target_dips}, Dipping every ~{dip_interval_strokes} strokes.")
         else:
             print("No further dips configured after initial setup.")
-            
         dip_counter = 0
-        
         for i, path in enumerate(scaled_toolpaths):
             if not path:
                 continue
-
-            # Calculate start position of this stroke
+            if dip_interval_strokes > 0 and (i + 1) % dip_interval_strokes == 0 and dip_counter < self.total_target_dips:
+                self._perform_dip()
+                dip_counter += 1
+                start_x_orig, start_y_orig, _ = path[0]
+                start_x = start_x_orig + self.x_offset
+                start_y = start_y_orig + self.y_offset
+                self.gcode.append(f"G0 X{start_x:.2f} Y{start_y:.2f} Z{self.z_safe_dip:.3f} ; Return to start of next stroke after dip (at Z_safe_dip)")
             start_x_orig, start_y_orig, start_width = path[0]
             start_x = start_x_orig + self.x_offset
             start_y = start_y_orig + self.y_offset
-
-            # Check if dip is needed
-            if dip_interval_strokes > 0 and (i + 1) % dip_interval_strokes == 0 and dip_counter < self.total_target_dips:
-                # Perform dip and travel directly to the start of this stroke
-                self._perform_dip(start_x, start_y)
-                dip_counter += 1
-                # Note: _perform_dip ends at (start_x, start_y, Z_safe)
-            else:
-                # If no dip, we need to travel to start point manually
-                # Move to start of stroke (at Z_safe)
-                self.gcode.append(f"G0 X{start_x:.2f} Y{start_y:.2f} Z{self.z_safe:.2f}")
-
-            # Painting Sequence
+            self.gcode.append(f"G0 X{start_x:.2f} Y{start_y:.2f} Z{self.z_safe:.2f} ; Move to start of stroke (at Z_safe)")
             start_z = self._width_to_z(start_width)
             self.gcode.append(f"G1 Z{start_z:.2f} F{self.feed_rate / 2} ; Lower brush to start painting Z")
-            
             for x_orig, y_orig, width in path:
                 x = x_orig + self.x_offset
                 y = y_orig + self.y_offset
                 z = self._width_to_z(width)
                 self.gcode.append(f"G1 X{x:.2f} Y{y:.2f} Z{z:.2f} F{self.feed_rate} ; Paint stroke segment")
-            
             self.gcode.append(f"G0 Z{self.z_safe:.2f} ; Lift brush after stroke (to Z_safe)")
-            
         final_dip_count = 1 if self._initial_dip_performed else 0
         final_dip_count += dip_counter
         print(f"G-code generation complete. Performed {final_dip_count} dips.")
@@ -293,30 +281,28 @@ if __name__ == "__main__":
     parser.add_argument("output_gcode", help="Path to the output G-code file.")
     parser.add_argument("--width", type=float, default=130.0, help="Target width of the final artwork in mm.")
     parser.add_argument("--height", type=float, default=None, help="Target height of the final artwork in mm. If not set, equals --width.")
-    parser.add_argument("--feed_rate", type=int, default=1500, help="Feed rate for travel moves in mm/min.")
-    parser.add_argument("--feed_rate_dip", type=int, default=600, help="Feed rate for dipping spiral moves in mm/min.")
-    parser.add_argument("--x_offset", type=float, default=50.0, help="Global X offset for the painting in mm.")
-    parser.add_argument("--y_offset", type=float, default=50.0, help="Global Y offset for the painting in mm.")
-    parser.add_argument("--z_safe", type=float, default=1.6, help="Safe Z height for rapid moves over the artwork (mm, before offset). Corresponds to z_low.")
-    parser.add_argument("--z_paint_max", type=float, default=0.0, help="Z height for the thinnest stroke (mm, before offset).")
-    parser.add_argument("--z_paint_min", type=float, default=-3.0, help="Z height for the widest stroke (mm, before offset).")
-    parser.add_argument("--z_safe_dip", type=float, default=16.0, help="Higher safe Z for moves to/from the dip location (mm, before offset). Corresponds to z_high.")
-    parser.add_argument("--z_global_offset", type=float, default=0, help="Global Z offset to add to all Z coordinates.")
-    parser.add_argument("--dip_x", type=float, default=30.0, help="X coordinate of the brush dipping location in mm.")
-    parser.add_argument("--dip_y", type=float, default=25.0, help="Y coordinate of the brush dipping location in mm.")
-    parser.add_argument("--dip_z", type=float, default=3.2, help="Z coordinate (depth) for brush dipping in mm (before offset).")
-    parser.add_argument("--total_dips", type=int, default=20, help="Total number of dips during the process.")
-    parser.add_argument("--dip_duration", type=float, default=0.3, help="Duration in seconds the brush dwells in the paint.")
-    parser.add_argument("--dip_wipe_radius", type=float, default=27.0, help="Radius of circular wipe (mm).")
-    parser.add_argument("--dip_spiral_radius", type=float, default=15.0, help="Radius of the mixing spiral inside the paint container (mm).")
-    parser.add_argument("--z_wipe_travel", type=float, default=7.0, help="Unused in new logic, kept for compatibility.")
-    parser.add_argument("--dip_entry_radius", type=float, default=5.0, help="Jitter radius for random dip entry points (mm).")
-    parser.add_argument("--total_dip_entries", type=int, default=0, help="Unused in new logic.")
-    parser.add_argument("--remove_drops_enabled", type=eval, default=True, choices=[True, False], help="Enable brush wiping.")
-    parser.add_argument("--dip_shake_distance", type=float, default=0, help="Unused in new logic.")
+    parser.add_argument("--feed_rate", type=int, default=100, help="Feed rate for painting moves in mm/min.")
+    parser.add_argument("--x_offset", type=float, default=0.0, help="Global X offset for the painting in mm.")
+    parser.add_argument("--y_offset", type=float, default=25.0, help="Global Y offset for the painting in mm.")
+    parser.add_argument("--z_safe", type=float, default=3.0, help="Safe Z height for rapid moves over the artwork (mm, before offset).")
+    parser.add_argument("--z_paint_max", type=float, default=0.0, help="Z height for the thinnest stroke (mm, before offset). This is typically the material surface.")
+    parser.add_argument("--z_paint_min", type=float, default=-3.0, help="Z height for the widest stroke (mm, before offset). This is the deepest penetration.")
+    parser.add_argument("--z_safe_dip", type=float, default=12.0, help="Higher safe Z for moves to/from the dip location (mm, before offset).")
+    parser.add_argument("--z_global_offset", type=float, default=3, help="Global Z offset to add to all Z coordinates.")
+    parser.add_argument("--dip_x", type=float, default=51.0, help="X coordinate of the brush dipping location in mm.")
+    parser.add_argument("--dip_y", type=float, default=3.0, help="Y coordinate of the brush dipping location in mm.")
+    parser.add_argument("--dip_z", type=float, default=3, help="Z coordinate (depth) for brush dipping in mm (before offset).")
+    parser.add_argument("--total_dips", type=int, default=20, help="Total number of dips during the process. Set to 0 for no dipping.")
+    parser.add_argument("--dip_duration", type=float, default=0.1, help="Duration in seconds the brush dwells in the paint.")
+    parser.add_argument("--dip_wipe_radius", type=float, default=29.0, help="Radius of circular wipe (mm). Set to 0 for linear shake-off.")
+    parser.add_argument("--z_wipe_travel", type=float, default=7.0, help="Z height for the wiping/shake-off motion (mm, before offset).")
+    parser.add_argument("--dip_entry_radius", type=float, default=10.0, help="Radius for random dip entry points (mm).")
+    parser.add_argument("--total_dip_entries", type=int, default=0, help="Number of dunks during a single dip cycle.")
+    parser.add_argument("--remove_drops_enabled", type=eval, default=True, choices=[True, False], help="Enable brush wiping/shake-off.")
+    parser.add_argument("--dip_shake_distance", type=float, default=0, help="Distance for linear shake-off motion (mm). Set to 0 to disable linear shake and use wipe radius if defined.")
     parser.add_argument("--max_brush_width", type=float, default=3.0, help="[Skeleton only] Max brush width to map Z-depth from (mm).")
     parser.add_argument("--min_path_length_px", type=int, default=2, help="[Skeleton only] Minimum length of a skeleton segment in pixels to be considered a path.")
-    parser.add_argument("--smooth_window_size", type=int, default=2, help="[Skeleton only] Window size for path smoothing.")
+    parser.add_argument("--smooth_window_size", type=int, default=2, help="[Skeleton only] Window size for path smoothing. Set to 1 for no smoothing.")
 
     args = parser.parse_args()
     if args.height is None:
@@ -324,14 +310,12 @@ if __name__ == "__main__":
 
     generator_kwargs = {
         'feed_rate': args.feed_rate,
-        'feed_rate_dip': args.feed_rate_dip,
         'x_offset': args.x_offset,
         'y_offset': args.y_offset,
         'dip_location_raw': (args.dip_x, args.dip_y, args.dip_z),
         'total_target_dips': args.total_dips,
         'dip_duration_s': args.dip_duration,
         'dip_wipe_radius': args.dip_wipe_radius,
-        'dip_spiral_radius': args.dip_spiral_radius,
         'z_wipe_travel_raw': args.z_wipe_travel,
         'dip_entry_radius': args.dip_entry_radius,
         'total_dip_entries': args.total_dip_entries,
