@@ -1,8 +1,5 @@
 # Width2Depth_GCode
 **Width2Depth_GCode** is a Python tool that maps image line width (via skeletonization) to a variable Z-axis depth for CNC G-code generation. Creates dynamic, pressure-sensitive strokes for artistic CNC plotting/painting.
-# Width2Depth_GCode
-
-**Width2Depth_GCode** is a Python tool that maps image line width (via skeletonization) to a variable Z-axis depth for CNC G-code generation. It creates dynamic, pressure-sensitive strokes for artistic CNC plotting, engraving, or painting.
 
 ---
 
@@ -19,7 +16,7 @@
 
 The script requires Python 3.x and several external libraries. You can typically install the dependencies using `pip`:
 
-```bash
+bash
 pip install numpy opencv-python scikit-image sknw scipy argparse
 
 
