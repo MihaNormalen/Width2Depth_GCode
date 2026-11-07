@@ -16,7 +16,7 @@ class GCodeBaseGenerator:
                  dip_entry_radius, remove_drops_enabled,
                  z_global_offset_val, z_safe_raw, z_safe_dip_raw,
                  feed_paint=None, accel_travel=12000, accel_paint=1000,
-                 water_dish=None):
+                 water_dish=None, z_wipe_exit_raw=None, water_enabled=True):
 
         self.feed_rate    = feed_rate                                   # travel feed
         self.feed_paint   = feed_paint if feed_paint is not None else feed_rate
@@ -30,6 +30,11 @@ class GCodeBaseGenerator:
         self.z_safe = z_safe_raw + self.z_global_offset
         self.z_safe_dip = z_safe_dip_raw + self.z_global_offset
         self.z_wipe_travel = z_wipe_travel_raw + self.z_global_offset
+        # z_wipe_exit: Z when leaving the dip station toward the canvas.
+        # Defaults to z_wipe_travel if not explicitly provided.
+        _exit_raw = z_wipe_exit_raw if z_wipe_exit_raw is not None else z_wipe_travel_raw
+        self.z_wipe_exit = _exit_raw + self.z_global_offset
+        self.water_enabled = water_enabled
 
         self.dip_location = (
             dip_location_raw[0],
@@ -82,6 +87,10 @@ class GCodeBaseGenerator:
         Cleans the brush in the water dish before moving to a new color.
         Uses identical Safe Y corridor approach/departure and jitter as _perform_dip.
         """
+        if not self.water_enabled:
+            self.gcode.append("; --- Water cleaning disabled (--water_enabled False) ---")
+            return
+
         if not self.water_dish:
             self.gcode.append("; --- WARNING: No water dish defined, skipping clean ---")
             return
@@ -99,14 +108,8 @@ class GCodeBaseGenerator:
         self.gcode.append(f"G0 Z{self.z_safe:.3f} F3000")
         self._set_speed('travel')
 
-        # 2. ORTHOGONAL SAFE APPROACH (Guarantees safe Y before traversing in X)
-        self.gcode.append(f"G0 Z{self.z_safe_dip:.3f} F3000")
-        # Pull out to safe Y corridor first
-        self.gcode.append(f"G0 Y{dip_abs_y + self.dip_wipe_radius:.3f}")
-        # Move horizontally to water dish X
-        self.gcode.append(f"G0 X{ax:.3f}")
-        # Now drop into water dish center in Y
-        self.gcode.append(f"G0 Y{ay:.3f}")
+        # 2. DIRECT APPROACH — fly straight to water dish XY at safe dip height
+        self.gcode.append(f"G0 X{ax:.3f} Y{ay:.3f} Z{self.z_safe_dip:.3f}")
 
         # 3. Plunge into water
         self.gcode.append(f"G1 Z{dip_z:.3f} F3000")
@@ -172,14 +175,8 @@ class GCodeBaseGenerator:
         self.gcode.append(f"G0 Z{self.z_safe:.3f} F3000")
         self._set_speed('travel')
 
-        # 2. ORTHOGONAL SAFE APPROACH (Guarantees safe Y before traversing in X)
-        self.gcode.append(f"G0 Z{self.z_safe_dip:.3f} F3000")
-        # Pull out to safe Y corridor first
-        self.gcode.append(f"G0 Y{dip_abs_y + self.dip_wipe_radius:.3f}")
-        # Move horizontally to dish X
-        self.gcode.append(f"G0 X{ax:.3f}")
-        # Now drop into dish center in Y
-        self.gcode.append(f"G0 Y{ay:.3f}")
+        # 2. DIRECT APPROACH — fly straight to dip XY at safe dip height
+        self.gcode.append(f"G0 X{ax:.3f} Y{ay:.3f} Z{self.z_safe_dip:.3f}")
 
         # 3. Plunge to dip depth
         self.gcode.append(f"G1 Z{dip_z:.3f} F3000")
@@ -196,13 +193,26 @@ class GCodeBaseGenerator:
         # 5. SCRAPE ON EDGE TO REMOVE PAINT & REACH SAFE Y
         self.gcode.append(f"G1 Z{self.z_wipe_travel:.3f} F1500")
         self.gcode.append(f"G1 X{dip_abs_x:.3f} Y{dip_abs_y + self.dip_wipe_radius:.3f} F1500")
-        self.gcode.append(f"G0 Z{self.z_safe_dip:.3f} F3000")
 
-        # 6. ORTHOGONAL SAFE DEPARTURE (Travel to canvas via corridor)
-        # Move in X to target X while staying on safe Y corridor
-        self.gcode.append(f"G0 X{tgt_abs_x:.3f}")
-        # Now move down in Y and Z to the Canvas
-        self.gcode.append(f"G0 Y{tgt_abs_y:.3f} Z{self.z_safe:.3f}")
+        # 6. DIRECTIONAL DEPARTURE — exit toward the painting target (like lines500 wipe_r logic)
+        if target_x is not None:
+            dx = tgt_abs_x - dip_abs_x
+            dy = tgt_abs_y - dip_abs_y
+            dist = math.hypot(dx, dy)
+            if dist > 0:
+                wx = dip_abs_x + (dx / dist * self.dip_wipe_radius)
+                wy = dip_abs_y + (dy / dist * self.dip_wipe_radius)
+            else:
+                wx = dip_abs_x + self.dip_wipe_radius
+                wy = dip_abs_y
+            # Rise to z_wipe_exit, glide to directional wipe point, then climb and travel to canvas
+            self.gcode.append(f"G0 Z{self.z_wipe_exit:.3f} F3000")
+            self.gcode.append(f"G0 X{wx:.3f} Y{wy:.3f}")
+            self.gcode.append(f"G0 Z{self.z_safe_dip:.3f} F3000")
+            self.gcode.append(f"G0 X{tgt_abs_x:.3f} Y{tgt_abs_y:.3f} Z{self.z_safe:.3f}")
+        else:
+            # No target provided — just lift to safe height
+            self.gcode.append(f"G0 Z{self.z_safe_dip:.3f} F3000")
 
         self.gcode.append("; --- DIP END ---")
 
@@ -434,65 +444,69 @@ if __name__ == "__main__":
     parser.add_argument("output_gcode", help="Path to output gcode file.")
 
     # ── Artwork / CNC ─────────────────────────────────────────────────────────
-    parser.add_argument("--width",           type=float, default=280.0, help="Target artwork width (mm).")
+    parser.add_argument("--width",           type=float, default=690.0, help="Target artwork width (mm).")
     parser.add_argument("--height",          type=float, default=None,  help="Target artwork height (mm). Defaults to proportionally fitting width if not provided.")
     parser.add_argument("--feed_rate",       type=int,   default=12000,   help="Travel feed rate (mm/min).")
     parser.add_argument("--feed_paint",      type=int,   default=600,     help="Paint/stroke feed rate (mm/min).")
     parser.add_argument("--accel_travel",    type=int,   default=12000,   help="Acceleration for travel moves (mm/s²).")
-    parser.add_argument("--accel_paint",     type=int,   default=500,     help="Acceleration for paint moves (mm/s²).")
-    parser.add_argument("--x_offset",        type=float, default=4.0,   help="Global X offset (mm).")
-    parser.add_argument("--y_offset",        type=float, default=60.0,  help="Global Y offset (mm).")
-    parser.add_argument("--z_safe",          type=float, default=3.0,   help="Safe Z for rapids (mm).")
+    parser.add_argument("--accel_paint",     type=int,   default=100,     help="Acceleration for paint moves (mm/s²).")
+    parser.add_argument("--x_offset",        type=float, default=215.0,   help="Global X offset (mm).")
+    parser.add_argument("--y_offset",        type=float, default=225.0,  help="Global Y offset (mm).")
+    parser.add_argument("--z_safe",          type=float, default=2.0,   help="Safe Z for rapids (mm).")
     parser.add_argument("--z_paint_max",     type=float, default=0.0,   help="Z for thinnest stroke (mm).")
-    parser.add_argument("--z_paint_min",     type=float, default=-5.0,  help="Z for widest stroke (mm).")
-    parser.add_argument("--z_safe_dip",      type=float, default=12.0,   help="Safe Z for dip moves (mm).")
-    parser.add_argument("--z_global_offset", type=float, default=5.0,   help="Global Z offset added to all Z values.")
+    parser.add_argument("--z_paint_min",     type=float, default=-3.4,  help="Z for widest stroke (mm).")
+    parser.add_argument("--z_safe_dip",      type=float, default=17.0,   help="Safe Z for dip moves (mm).")
+    parser.add_argument("--z_global_offset", type=float, default=3.4,   help="Global Z offset added to all Z values.")
 
     # ── Dip Station ───────────────────────────────────────────────────────────
     parser.add_argument("--dip_duration",          type=float, default=0.00,  help="Dip dwell time (s).")
-    parser.add_argument("--dip_wipe_radius",        type=float, default=29.0,  help="Wipe radius from tray center (mm).")
+    parser.add_argument("--dip_wipe_radius",        type=float, default=34.0,  help="Wipe radius from tray center (mm).")
     parser.add_argument("--z_wipe_travel",          type=float, default=1.0,   help="Z height for wipe motion (mm).")
-    parser.add_argument("--dip_entry_radius",       type=float, default=10.0,   help="Inner wipe start radius (mm).")
+    parser.add_argument("--dip_entry_radius",       type=float, default=8.0,   help="Inner wipe start radius (mm).")
     parser.add_argument("--remove_drops_enabled",   type=eval,  default=False, choices=[True, False], help="Enable remove_drops wipe.")
-    parser.add_argument("--dip_distance_threshold", type=float, default=100.0,  help="Painted travel (mm) before re-dipping.")
-    parser.add_argument("--dip_jitter",        type=float, default=10.0, help="Random XY jitter on dip approach (mm).")
+    parser.add_argument("--dip_distance_threshold", type=float, default=120.0,  help="Painted travel (mm) before re-dipping.")
+    parser.add_argument("--dip_jitter",        type=float, default=8.0, help="Random XY jitter on dip approach (mm).")
     parser.add_argument("--dip_spiral_loops",  type=float, default=1.0,  help="Number of spiral loops during dip.")
-    parser.add_argument("--dip_spiral_r",      type=float, default=10.0, help="Max spiral radius during dip (mm).")
+    parser.add_argument("--dip_spiral_r",      type=float, default=8.0, help="Max spiral radius during dip (mm).")
+    parser.add_argument("--z_wipe_exit",       type=float, default=9.4,
+                        help="Z height when exiting dip toward canvas (mm). Defaults to z_wipe_travel if omitted.")
+    parser.add_argument("--water_enabled",     type=eval,  default=False, choices=[True, False],
+                        help="Enable water-dish cleaning between color changes.")
 
     # ── Color Positions ───────────────────────────────────────────────────────
-    parser.add_argument("--color_index", type=int, default=2, choices=[1, 2, 3, 4])
+    parser.add_argument("--color_index", type=int, default=1, choices=[1, 2, 3, 4])
 
-    parser.add_argument("--color1_dip_x", type=float, default=88.0,  help="Color 1 dip X (mm).")
-    parser.add_argument("--color1_dip_y", type=float, default=0.0,   help="Color 1 dip Y (mm).")
+    parser.add_argument("--color1_dip_x", type=float, default=116.0,  help="Color 1 dip X (mm).")
+    parser.add_argument("--color1_dip_y", type=float, default=736.0,   help="Color 1 dip Y (mm).")
     parser.add_argument("--color1_dip_z", type=float, default=1.0,   help="Color 1 dip Z depth (mm).")
 
-    parser.add_argument("--color2_dip_x", type=float, default=148.0,  help="Color 2 dip X (mm).")
-    parser.add_argument("--color2_dip_y", type=float, default=0.0,   help="Color 2 dip Y (mm).")
+    parser.add_argument("--color2_dip_x", type=float, default=553.0,  help="Color 2 dip X (mm).")
+    parser.add_argument("--color2_dip_y", type=float, default=144.0,   help="Color 2 dip Y (mm).")
     parser.add_argument("--color2_dip_z", type=float, default=1.0,   help="Color 2 dip Z depth (mm).")
 
-    parser.add_argument("--color3_dip_x", type=float, default=209.0, help="Color 3 dip X (mm).")
-    parser.add_argument("--color3_dip_y", type=float, default=0.0,   help="Color 3 dip Y (mm).")
+    parser.add_argument("--color3_dip_x", type=float, default=990.0, help="Color 3 dip X (mm).")
+    parser.add_argument("--color3_dip_y", type=float, default=720.0,   help="Color 3 dip Y (mm).")
     parser.add_argument("--color3_dip_z", type=float, default=1.0,   help="Color 3 dip Z depth (mm).")
 
-    parser.add_argument("--color4_dip_x", type=float, default=269.0, help="Color 4 dip X (mm).")
-    parser.add_argument("--color4_dip_y", type=float, default=0.0,   help="Color 4 dip Y (mm).")
+    parser.add_argument("--color4_dip_x", type=float, default=534.0, help="Color 4 dip X (mm).")
+    parser.add_argument("--color4_dip_y", type=float, default=1308.0,   help="Color 4 dip Y (mm).")
     parser.add_argument("--color4_dip_z", type=float, default=1.0,   help="Color 4 dip Z depth (mm).")
 
     # ── Water Position ───────────────────────────────────────────
-    parser.add_argument("--water_dip_x", type=float, default=28.0, help="Water dish X (mm).")
-    parser.add_argument("--water_dip_y", type=float, default=0.0,   help="Water dish Y (mm).")
+    parser.add_argument("--water_dip_x", type=float, default=116.0, help="Water dish X (mm).")
+    parser.add_argument("--water_dip_y", type=float, default=144.0,   help="Water dish Y (mm).")
     parser.add_argument("--water_dip_z", type=float, default=1.0,   help="Water dish Z depth (mm).")
 
     # ── Image Processing ──────────────────────────────────────────────────────
-    parser.add_argument("--max_brush_width",    type=float, default=4.0,  help="Max brush width (mm) for Z mapping.")
+    parser.add_argument("--max_brush_width",    type=float, default=10.0,  help="Max brush width (mm) for Z mapping.")
     parser.add_argument("--min_path_length_px", type=int,   default=15,    help="Minimum skeleton path length in px.")
-    parser.add_argument("--smooth_window_size", type=int,   default=3,    help="Smoothing window size.")
+    parser.add_argument("--smooth_window_size", type=int,   default=7,    help="Smoothing window size.")
     parser.add_argument("--path_optimize",      type=eval,  default=True, choices=[True, False])
 
     # ── Tutti Frutti ──────────────────────────────────────────────────────────
     parser.add_argument("--tf_enabled",   type=eval,  default=False, choices=[True, False])
-    parser.add_argument("--tf_min_dist",  type=float, default=40.0)
-    parser.add_argument("--tf_max_dist",  type=float, default=80.0)
+    parser.add_argument("--tf_min_dist",  type=float, default=200.0)
+    parser.add_argument("--tf_max_dist",  type=float, default=300.0)
     parser.add_argument("--tf_no_repeat", type=eval,  default=True, choices=[True, False])
 
     args = parser.parse_args()
@@ -541,6 +555,8 @@ if __name__ == "__main__":
         'z_global_offset_val':  args.z_global_offset,
         'z_safe_raw':           args.z_safe,
         'z_safe_dip_raw':       args.z_safe_dip,
+        'z_wipe_exit_raw':      args.z_wipe_exit,
+        'water_enabled':        args.water_enabled,
         'water_dish':           water_dish, 
     }
 

@@ -1,6 +1,0 @@
-numpy
-opencv-python
-scikit-image
-scipy
-Pillow
-sknw

@@ -1,71 +1,38 @@
 # Width2Depth_GCode
-
-Python tools that turn a black-and-white picture into G-code for a **brush-painting CNC machine**. The main idea:
-the centre line of every shape is painted as one stroke, and the brush goes **deeper where the line is wider**. That
-gives real, pressure-like brush strokes instead of a constant pen line. The scripts also handle refilling the brush:
-a dip in a paint dish (petri dish) every so many mm of painting, with spiral, jitter and wipe moves.
+**Width2Depth_GCode** is a Python tool that maps image line width (via skeletonization) to a variable Z-axis depth for CNC G-code generation. Creates dynamic, pressure-sensitive strokes for artistic CNC plotting/painting.
 
 ---
 
-## Which script to use
+## ✨ Features
 
-| Folder | Script | What it does |
-| :--- | :--- | :--- |
-| `infill/` | **`multi_random_path_small_dipZ.py`** ⭐ newest | Fills the shapes with straight lines at any angle, or with rings. Strokes are grouped into blob-shaped clusters (k-means) that are visited in random order. The brush dips in whichever **dish is closest**, and the **dip gets gradually deeper** as the paint in the dishes runs low. Settings in the script are for a large machine (770 mm wide painting, two dishes). |
-| `tutti_frutti/` | **`W2D_tf_papa2.py`** ⭐ newest width-to-depth | Width-to-depth strokes for up to **4 colours** (one dish each) and a water dish for rinsing (`--water_enabled`). "Tutti-frutti" mode (`--tf_enabled True`) dips in a random colour dish each time, without repeating the last one. Stroke order optimisation, separate travel / paint speeds and accelerations. |
-| | `Width2Depth_tutti-frutti.py` | Earlier version of the above, without the water-rinse option. |
-| `width2depth/` | `Width2Depth.py` | The original width-to-depth generator. Dips in the middle of a stroke when the paint distance is used up. |
-| | `wide2depthSpiral_distanc.py` | Same, but always finishes the stroke and dips **before** the next one (no dip in the middle of a line). |
-| | `D2Woptimized.py` | Width-to-depth with path optimisation, drop removal (`--remove_drops_enabled`) and a dip every `--dip_distance_threshold` mm. |
-| | `Width2Depth_with_backlash_fix.py` | Width-to-depth with a variable backlash compensation for X and Y (`--bx_start`, `--bx_end`, `--by_start`, `--by_end`). |
-| `web/` | `PaintByNumbers2_GRBL.html` | "Bacterial Painter": a browser tool (open the file, no install) that makes GRBL G-code from a picture. |
-| `examples/` | `poletna.png`, `obrazMoski.jpeg` | Pictures to try. |
+* **Adaptive Z-Axis Control:** Converts line intensity/width from an image (derived from skeletonization and distance maps) into a variable Z-axis position (depth or pressure).
+* **Dynamic Strokes:** Generates G-code that mimics dynamic brushstrokes, where wider sections of the source image result in deeper or firmer tool contact.
+* **Complex Path Generation:** Uses advanced image processing libraries (`scikit-image`, `sknw`) to create efficient, centerline-based toolpaths (skeletonization).
+* **Automatic Tool Dipping:** Supports configuration for automatic tool dipping and wiping cycles, crucial for fluid-based applications (e.g., CNC painting).
+* **Path Smoothing:** Includes path smoothing options (`smooth_window_size`) to reduce chatter and improve the quality of G-code motion.
+* **Safety Offsets:** Allows setting global Z-offsets, safe Z-heights (`z_safe_raw`), and specific Z-heights for dip cycles.
 
-## Install
+## 🛠️ Prerequisites
 
-Python 3.8 or newer:
+The script requires Python 3.x and several external libraries. You can typically install the dependencies using `pip`:
 
-```
-pip install -r requirements.txt
-```
+bash
+pip install numpy opencv-python scikit-image sknw scipy argparse
 
-## Usage
 
-### Width-to-depth scripts
+python Width2Depth.py <INPUT_IMAGE> <OUTPUT_GCODE> [OPTIONS]
 
-```
-python width2depth/Width2Depth.py examples/poletna.png out.gcode --width 300 --z_paint_max -0.5 --z_paint_min -0.1 --feed_rate 1500
-```
+python Width2Depth.py input.png output.gcode --width 300 --height 300 --z_paint_max -0.5 --z_paint_min -0.1 --feed_rate 1500
 
-Every option has a default; `python <script> --help` lists them. The most important ones:
+Argument,Description,Default
+INPUT_IMAGE,"Path to the source image file (e.g., PNG, JPEG).",N/A
+OUTPUT_GCODE,Path to the final G-code output file.,N/A
+--width,Physical width of the drawing area (mm).,Mandatory
+--height,Physical height of the drawing area (mm).,Defaults to --width
+--z_paint_max,"Maximum painting depth/pressure (e.g., -0.5mm).",0.0
+--z_paint_min,"Minimum painting depth/pressure (e.g., -0.1mm).",0.0
+--max_brush_width,Maximum width of the brush/tool in millimeters.,1.0
+--feed_rate,G1 feed rate in mm/min.,500
+--z_safe,Safe Z-height for rapid moves.,5.0
+"--dip_x, --dip_y, --dip_z",Coordinates for the tool dipping station (for automatic refills).,0.0
 
-| Option | Meaning |
-| :--- | :--- |
-| `--width`, `--height` | size of the painting in mm (height follows the picture if left out) |
-| `--x_offset`, `--y_offset` | where the painting starts on the machine |
-| `--z_paint_min`, `--z_paint_max` | Z for the thinnest and for the widest line (the brush depth in between follows the width) |
-| `--max_brush_width` | the widest line the brush can make, mm |
-| `--z_safe`, `--z_global_offset` | travel height; one offset added to every Z |
-| `--dip_x`, `--dip_y`, `--dip_z` | the paint dish (the tutti-frutti scripts use `--color1_dip_x` … `--color4_dip_z` and `--water_dip_*`) |
-| `--smooth_window_size`, `--min_path_length_px` | smoothing of the strokes, shortest stroke kept |
-
-### multi_random_path_small_dipZ.py
-
-The settings are in the `config` block at the bottom of the script (painting size, brush width, line angle,
-cluster size, dish positions, `dip_z_start` / `dip_z_end`, speeds). Edit them, then:
-
-```
-python infill/multi_random_path_small_dipZ.py picture.png out.gcode
-```
-
-## How width becomes depth
-
-1. The picture is turned into black and white and skeletonised: every shape becomes its centre line.
-2. The distance transform gives the line width at every point of that centre line.
-3. Each width is mapped between `--z_paint_min` (thin) and `--z_paint_max` (wide), and every G-code point gets
-   its own Z.
-4. Strokes are smoothed, ordered to keep travel short, and split by dips in the paint dish.
-
-## License
-
-[Apache 2.0](LICENSE)
